@@ -24,6 +24,13 @@ export default Ember.Component.extend({
     var duration = 400;
     var i = 0;
     var svg = d3.select('#' + this.get('elementId')).select('g');
+    var svgGroup = svg.append("g");
+    var nodes;
+    var links;
+    // panning variables
+    var panSpeed = 200;
+    var panBoundary = 20; // Within 20px from edges will pan when dragging.
+    var scale;
     var tree = d3.layout.tree().size([height, width]);
     var collapse = function(d) {
       if (d.children) {
@@ -44,6 +51,100 @@ export default Ember.Component.extend({
       update(d);
     };
 
+    // Define the zoom function for the zoomable tree
+    var zoom = function() {
+      svgGroup.attr("transform", "translate(" + d3.event.translate + ")scale(" + d3.event.scale + ")");
+    }
+    // define the zoomListener which calls the zoom function on the "zoom" event constrained within the scaleExtents
+    var zoomListener = d3.behavior.zoom().scaleExtent([0.1, 3]).on("zoom", zoom);
+
+    var initiateDrag = function(d, domNode) {
+      var nodePaths;
+      var nodesExit;
+      draggingNode = d;
+      d3.select(domNode).select('.ghostCircle').attr('pointer-events', 'none');
+      d3.selectAll('.ghostCircle').attr('class', 'ghostCircle show');
+      d3.select(domNode).attr('class', 'node activeDrag');
+
+      svgGroup.selectAll("g.node").sort(function(a, b) { // select the parent and sort the path's
+        if (a.id != draggingNode.id) return 1; // a is not the hovered element, send "a" to the back
+        else return -1; // a is the hovered element, bring "a" to the front
+      });
+      // if nodes has children, remove the links and nodes
+      if (nodes.length > 1) {
+        // remove link paths
+        links = tree.links(nodes);
+        nodePaths = svgGroup.selectAll("path.link")
+          .data(links, function(d) {
+            return d.target.id;
+          }).remove();
+        // remove child nodes
+        nodesExit = svgGroup.selectAll("g.node")
+          .data(nodes, function(d) {
+            return d.id;
+          }).filter(function(d, i) {
+            if (d.id == draggingNode.id) {
+              return false;
+            }
+            return true;
+          }).remove();
+      }
+    };
+
+    var endDrag = function() {
+      selectedNode = null;
+      d3.selectAll('.ghostCircle').attr('class', 'ghostCircle');
+      d3.select(domNode).attr('class', 'node');
+      // now restore the mouseover event or we won't be able to drag a 2nd time
+      d3.select(domNode).select('.ghostCircle').attr('pointer-events', '');
+      updateTempConnector();
+      if (draggingNode !== null) {
+        update(data);
+        centerNode(draggingNode);
+        draggingNode = null;
+      }
+    };
+
+    var centerNode = function(source) {
+        scale = zoomListener.scale();
+        var x = -source.y0;
+        var y = -source.x0;
+        x = x * scale + width / 2;
+        y = y * scale + height / 2;
+        d3.select('g').transition()
+          .duration(duration)
+          .attr("transform", "translate(" + x + "," + y + ")scale(" + scale + ")");
+        zoomListener.scale(scale);
+        zoomListener.translate([x, y]);
+    }
+
+    var updateTempConnector = function() {
+      var data = [];
+      if (draggingNode !== null && selectedNode !== null) {
+        // have to flip the source coordinates since we did this for the existing connectors on the original tree
+        data = [{
+          source: {
+            x: selectedNode.y0,
+            y: selectedNode.x0
+          },
+          target: {
+            x: draggingNode.y0,
+            y: draggingNode.x0
+          }
+        }];
+      }
+      var link = svgGroup.selectAll(".templink").data(data);
+
+      link.enter().append("path")
+        .attr("class", "templink")
+        .attr("d", d3.svg.diagonal())
+        .attr('pointer-events', 'none');
+
+      link.attr("d", d3.svg.diagonal());
+
+      link.exit().remove();
+    };
+
     var ui = {
       layerHeight: 100,
       circle: {
@@ -53,11 +154,9 @@ export default Ember.Component.extend({
     };
 
     var update = function(source) {
-      var nodes = tree.nodes(data).reverse();
-      var links = tree.links(nodes);
+      nodes = tree.nodes(data).reverse();
+      links = tree.links(nodes);
       nodes.forEach(function(d) {
-        console.log(d.depth);
-        console.log(d.depth);
         d.y = (d.depth + 1) * ui.layerHeight;
       });
 
@@ -66,6 +165,7 @@ export default Ember.Component.extend({
       });
 
       var nodeEnter = node.enter().append("g")
+        .call(dragListener)
         .attr("class", "node")
         .attr("transform", function() {
           return "translate(" + source.x0 + "," + source.y0 + ")";
@@ -180,6 +280,89 @@ export default Ember.Component.extend({
         d.y0 = d.y;
       });
     };
+
+    // Define the drag listeners for drag/drop behaviour of nodes.
+    // variables for drag/drop
+    var selectedNode = null;
+    var draggingNode = null;
+    var domNode;
+    var dragStarted;
+    var dragListener = d3.behavior.drag()
+      .on("dragstart", function(d) {
+        if (d === data) {
+          return;
+        }
+        dragStarted = true;
+        var nodes = tree.nodes(d);
+        d3.event.sourceEvent.stopPropagation();
+        // it's important that we suppress the mouseover event on the node being dragged. Otherwise it will absorb the mouseover event and the underlying node will not detect it d3.select(this).attr('pointer-events', 'none');
+      })
+      .on("drag", function(d) {
+        if (d === data) {
+          return;
+        }
+        if (dragStarted) {
+          domNode = this;
+          initiateDrag(d, domNode);
+        }
+
+        // get coords of mouseEvent relative to svg container to allow for panning
+        var relCoords = d3.mouse($('svg').get(0));
+        if (relCoords[0] < panBoundary) {
+          panTimer = true;
+          pan(this, 'left');
+        } else if (relCoords[0] > ($('svg').width() - panBoundary)) {
+
+          panTimer = true;
+          pan(this, 'right');
+        } else if (relCoords[1] < panBoundary) {
+          panTimer = true;
+          pan(this, 'up');
+        } else if (relCoords[1] > ($('svg').height() - panBoundary)) {
+          panTimer = true;
+          pan(this, 'down');
+        } else {
+          try {
+            clearTimeout(panTimer);
+          } catch (e) {
+
+          }
+        }
+
+        d.x0 += d3.event.dy;
+        d.y0 += d3.event.dx;
+        var node = d3.select(this);
+        node.attr("transform", "translate(" + d.y0 + "," + d.x0 + ")");
+        updateTempConnector();
+      }).on("dragend", function(d) {
+        if (d === data) {
+          return;
+        }
+        domNode = this;
+        if (selectedNode) {
+          // now remove the element from the parent, and insert it into the new elements children
+          var index = draggingNode.parent.children.indexOf(draggingNode);
+          if (index > -1) {
+            draggingNode.parent.children.splice(index, 1);
+          }
+          if (typeof selectedNode.children !== 'undefined' || typeof selectedNode._children !== 'undefined') {
+            if (typeof selectedNode.children !== 'undefined') {
+              selectedNode.children.push(draggingNode);
+            } else {
+              selectedNode._children.push(draggingNode);
+            }
+          } else {
+            selectedNode.children = [];
+            selectedNode.children.push(draggingNode);
+          }
+          // Make sure that the node being added to is expanded so user can see added node is correctly moved
+          expand(selectedNode);
+          sortTree();
+          endDrag();
+        } else {
+          endDrag();
+        }
+      });
 
     data.children.forEach(collapse);
     update(data);
