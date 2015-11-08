@@ -27,7 +27,9 @@ export default Ember.Component.extend({
     var svgGroup = svg.append("g");
     var nodes;
     var links;
+    var translateCoords;
     // panning variables
+    var panTimer;
     var panSpeed = 200;
     var panBoundary = 20; // Within 20px from edges will pan when dragging.
     var scale;
@@ -99,8 +101,8 @@ export default Ember.Component.extend({
       d3.select(domNode).select('.ghostCircle').attr('pointer-events', '');
       updateTempConnector();
       if (draggingNode !== null) {
+        // centerNode(draggingNode);
         update(data);
-        centerNode(draggingNode);
         draggingNode = null;
       }
     };
@@ -118,18 +120,60 @@ export default Ember.Component.extend({
         zoomListener.translate([x, y]);
     }
 
+    var expand = function(d) {
+      if (d._children) {
+        d.children = d._children;
+        d.children.forEach(expand);
+        d._children = null;
+      }
+    };
+
+    var pan = function(domNode, direction) {
+      var speed = panSpeed;
+      if (panTimer) {
+        clearTimeout(panTimer);
+        translateCoords = d3.transform(svgGroup.attr("transform"));
+        if (direction == 'left' || direction == 'right') {
+          translateX = direction == 'left' ? translateCoords.translate[0] + speed : translateCoords.translate[0] - speed;
+          translateY = translateCoords.translate[1];
+        } else if (direction == 'up' || direction == 'down') {
+          translateX = translateCoords.translate[0];
+          translateY = direction == 'up' ? translateCoords.translate[1] + speed : translateCoords.translate[1] - speed;
+        }
+        scaleX = translateCoords.scale[0];
+        scaleY = translateCoords.scale[1];
+        scale = zoomListener.scale();
+        svgGroup.transition().attr("transform", "translate(" + translateX + "," + translateY + ")scale(" + scale + ")");
+        d3.select(domNode).select('g.node').attr("transform", "translate(" + translateX + "," + translateY + ")");
+        zoomListener.scale(zoomListener.scale());
+        zoomListener.translate([translateX, translateY]);
+        panTimer = setTimeout(function() {
+          pan(domNode, speed, direction);
+        }, 50);
+      }
+    }
+
+    var overCircle = function(d) {
+        selectedNode = d;
+        updateTempConnector();
+    };
+    var outCircle = function(d) {
+        selectedNode = null;
+        updateTempConnector();
+    };
+
     var updateTempConnector = function() {
       var data = [];
       if (draggingNode !== null && selectedNode !== null) {
         // have to flip the source coordinates since we did this for the existing connectors on the original tree
         data = [{
           source: {
-            x: selectedNode.y0,
-            y: selectedNode.x0
+            x: selectedNode.x0,
+            y: selectedNode.y0
           },
           target: {
-            x: draggingNode.y0,
-            y: draggingNode.x0
+            x: draggingNode.x0,
+            y: draggingNode.y0
           }
         }];
       }
@@ -186,6 +230,19 @@ export default Ember.Component.extend({
           return d.name;
         })
         .style("fill-opacity", 1);
+
+      nodeEnter.append("circle")
+        .attr('class', 'ghostCircle')
+        .attr("r", ui.circle.radius)
+        .attr("opacity", 0.2) // change this to zero to hide the target area
+        .style("fill", "red")
+        .attr('pointer-events', 'mouseover')
+        .on("mouseover", function(node) {
+          overCircle(node);
+        })
+        .on("mouseout", function(node) {
+          outCircle(node);
+        });
 
       // Transition nodes to their new position.
       var nodeUpdate = node.transition()
@@ -289,7 +346,7 @@ export default Ember.Component.extend({
     var dragStarted;
     var dragListener = d3.behavior.drag()
       .on("dragstart", function(d) {
-        if (d === data) {
+        if (d == data) {
           return;
         }
         dragStarted = true;
@@ -298,7 +355,7 @@ export default Ember.Component.extend({
         // it's important that we suppress the mouseover event on the node being dragged. Otherwise it will absorb the mouseover event and the underlying node will not detect it d3.select(this).attr('pointer-events', 'none');
       })
       .on("drag", function(d) {
-        if (d === data) {
+        if (d == data) {
           return;
         }
         if (dragStarted) {
@@ -335,7 +392,7 @@ export default Ember.Component.extend({
         node.attr("transform", "translate(" + d.y0 + "," + d.x0 + ")");
         updateTempConnector();
       }).on("dragend", function(d) {
-        if (d === data) {
+        if (d == data) {
           return;
         }
         domNode = this;
@@ -345,7 +402,7 @@ export default Ember.Component.extend({
           if (index > -1) {
             draggingNode.parent.children.splice(index, 1);
           }
-          if (typeof selectedNode.children !== 'undefined' || typeof selectedNode._children !== 'undefined') {
+          if (typeof selectedNode.children !== 'undefined' && typeof selectedNode._children !== 'undefined') {
             if (typeof selectedNode.children !== 'undefined') {
               selectedNode.children.push(draggingNode);
             } else {
@@ -357,7 +414,7 @@ export default Ember.Component.extend({
           }
           // Make sure that the node being added to is expanded so user can see added node is correctly moved
           expand(selectedNode);
-          sortTree();
+          // sortTree();
           endDrag();
         } else {
           endDrag();
